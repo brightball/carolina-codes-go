@@ -82,11 +82,13 @@ func main() {
 		writeJSON(w, map[string]any{"data": out})
 	})
 	mux.HandleFunc("GET /v1/speakers", func(w http.ResponseWriter, r *http.Request) {
-		q := "SELECT slug, first_name, last_name, name, tagline, bio, company, location, photo_path, featured FROM v1_speakers"
+		q := "SELECT " + speakerColumns + " FROM v1_speakers"
 		args := []any{}
-		if year := r.URL.Query().Get("year"); year != "" {
+		var year *int
+		if raw := r.URL.Query().Get("year"); raw != "" {
 			q += " WHERE slug IN (SELECT speaker_slug FROM v1_talks WHERE year = $1)"
-			n, _ := strconv.Atoi(year)
+			n, _ := strconv.Atoi(raw)
+			year = &n
 			args = append(args, n)
 		}
 		q += " ORDER BY last_name, first_name"
@@ -97,6 +99,9 @@ func main() {
 		}
 		defer rows.Close()
 		out := speakersFromRows(rows)
+		if year != nil {
+			out = attachYearTags(r.Context(), pool, out, *year)
+		}
 		writeJSON(w, map[string]any{"data": out})
 	})
 	mux.HandleFunc("GET /v1/speakers/{year}/{slug}", func(w http.ResponseWriter, r *http.Request) {
@@ -117,6 +122,8 @@ func main() {
 		speaker["years"] = years
 		speaker["other_years"] = exceptYear(years, year)
 		speaker["talks"] = talks
+		speaker["languages"] = uniqTalkField(talks, "languages")
+		speaker["topics"] = uniqTalkField(talks, "topics")
 		writeJSON(w, map[string]any{"data": speaker})
 	})
 	mux.HandleFunc("GET /v1/speakers/{slug}", func(w http.ResponseWriter, r *http.Request) {
@@ -211,17 +218,20 @@ type rowIter interface {
 	Scan(dest ...any) error
 }
 
+const speakerColumns = "slug, first_name, last_name, name, tagline, bio, company, location, photo_path, twitter_url, linkedin_url, website_url, github_url, featured"
+
 func scanSpeaker(row scanner) (map[string]any, error) {
 	var slug, first, last, name string
-	var tagline, bio, company, location, photo *string
+	var tagline, bio, company, location, photo, twitter, linkedin, website, github *string
 	var featured bool
-	if err := row.Scan(&slug, &first, &last, &name, &tagline, &bio, &company, &location, &photo, &featured); err != nil {
+	if err := row.Scan(&slug, &first, &last, &name, &tagline, &bio, &company, &location, &photo, &twitter, &linkedin, &website, &github, &featured); err != nil {
 		return nil, err
 	}
 	return map[string]any{
 		"slug": slug, "first_name": first, "last_name": last, "name": name,
 		"tagline": tagline, "bio": bio, "company": company, "location": location,
-		"photo_path": photo, "featured": featured,
+		"photo_path": photo, "twitter_url": twitter, "linkedin_url": linkedin,
+		"website_url": website, "github_url": github, "featured": featured,
 	}, nil
 }
 
@@ -240,13 +250,13 @@ func speakersFromRows(rows rowIter) []map[string]any {
 
 func loadSpeaker(ctx context.Context, pool *pgxpool.Pool, slug string) (map[string]any, error) {
 	row := pool.QueryRow(ctx,
-		"SELECT slug, first_name, last_name, name, tagline, bio, company, location, photo_path, featured FROM v1_speakers WHERE slug = $1",
+		"SELECT "+speakerColumns+" FROM v1_speakers WHERE slug = $1",
 		slug)
 	return scanSpeaker(row)
 }
 
 func loadTalks(ctx context.Context, pool *pgxpool.Pool, slug string, year *int) []map[string]any {
-	q := "SELECT slug, title, description, format, youtube_id, year FROM v1_talks WHERE speaker_slug = $1"
+	q := "SELECT slug, title, description, format, youtube_id, year, languages, topics FROM v1_talks WHERE speaker_slug = $1"
 	args := []any{slug}
 	if year != nil {
 		q += " AND year = $2"
@@ -262,14 +272,57 @@ func loadTalks(ctx context.Context, pool *pgxpool.Pool, slug string, year *int) 
 		var tslug, title string
 		var desc, format, yt *string
 		var yr int
-		if err := trows.Scan(&tslug, &title, &desc, &format, &yt, &yr); err == nil {
+		var langs, topics []string
+		if err := trows.Scan(&tslug, &title, &desc, &format, &yt, &yr, &langs, &topics); err == nil {
+			if langs == nil {
+				langs = []string{}
+			}
+			if topics == nil {
+				topics = []string{}
+			}
 			talks = append(talks, map[string]any{
 				"slug": tslug, "title": title, "description": desc,
 				"format": format, "youtube_id": yt, "year": yr,
+				"languages": langs, "topics": topics,
 			})
 		}
 	}
 	return talks
+}
+
+func attachYearTags(ctx context.Context, pool *pgxpool.Pool, speakers []map[string]any, year int) []map[string]any {
+	for _, speaker := range speakers {
+		slug, _ := speaker["slug"].(string)
+		talks := loadTalks(ctx, pool, slug, &year)
+		speaker["year"] = year
+		speaker["talks"] = talks
+		speaker["languages"] = uniqTalkField(talks, "languages")
+		speaker["topics"] = uniqTalkField(talks, "topics")
+		speaker["years"] = talkYears(ctx, pool, slug)
+	}
+	return speakers
+}
+
+func uniqTalkField(talks []map[string]any, key string) []string {
+	seen := map[string]struct{}{}
+	out := []string{}
+	for _, talk := range talks {
+		vals, _ := talk[key].([]string)
+		for _, val := range vals {
+			if val == "" {
+				continue
+			}
+			if _, ok := seen[val]; ok {
+				continue
+			}
+			seen[val] = struct{}{}
+			out = append(out, val)
+		}
+	}
+	if out == nil {
+		out = []string{}
+	}
+	return out
 }
 
 func talkYears(ctx context.Context, pool *pgxpool.Pool, slug string) []int {
