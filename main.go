@@ -16,7 +16,7 @@ import (
 
 const (
 	language      = "Go"
-	apiVersion    = "0.1.0"
+	apiVersion    = "0.2.0"
 	framework     = "net/http"
 	createdYear   = 2026
 	schemaVersion = 1
@@ -28,8 +28,10 @@ var endpoints = []map[string]any{
 	{"method": "GET", "path": "/v1/years", "query": []string{}},
 	{"method": "GET", "path": "/v1/speakers", "query": []string{"year"}},
 	{"method": "GET", "path": "/v1/speakers/:slug", "query": []string{}},
+	{"method": "GET", "path": "/v1/speakers/:year/:slug", "query": []string{}},
 	{"method": "GET", "path": "/v1/sponsors", "query": []string{"year"}},
 	{"method": "GET", "path": "/v1/sponsors/:slug", "query": []string{}},
+	{"method": "GET", "path": "/v1/sponsors/:year/:slug", "query": []string{}},
 }
 
 func main() {
@@ -97,52 +99,80 @@ func main() {
 		out := speakersFromRows(rows)
 		writeJSON(w, map[string]any{"data": out})
 	})
-	mux.HandleFunc("GET /v1/speakers/{slug}", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /v1/speakers/{year}/{slug}", func(w http.ResponseWriter, r *http.Request) {
+		year, _ := strconv.Atoi(r.PathValue("year"))
 		slug := r.PathValue("slug")
-		row := pool.QueryRow(r.Context(),
-			"SELECT slug, first_name, last_name, name, tagline, bio, company, location, photo_path, featured FROM v1_speakers WHERE slug = $1",
-			slug)
-		speaker, err := scanSpeaker(row)
+		speaker, err := loadSpeaker(r.Context(), pool, slug)
 		if err != nil {
 			http.Error(w, `{"error":"not_found"}`, 404)
 			return
 		}
-		talks := []map[string]any{}
-		trows, err := pool.Query(r.Context(),
-			"SELECT slug, title, description, format, youtube_id, year FROM v1_talks WHERE speaker_slug = $1", slug)
-		if err == nil {
-			defer trows.Close()
-			for trows.Next() {
-				var tslug, title string
-				var desc, format, yt *string
-				var year int
-				if err := trows.Scan(&tslug, &title, &desc, &format, &yt, &year); err == nil {
-					talks = append(talks, map[string]any{
-						"slug": tslug, "title": title, "description": desc,
-						"format": format, "youtube_id": yt, "year": year,
-					})
-				}
-			}
+		talks := loadTalks(r.Context(), pool, slug, &year)
+		if len(talks) == 0 {
+			http.Error(w, `{"error":"not_found"}`, 404)
+			return
 		}
+		years := talkYears(r.Context(), pool, slug)
+		speaker["year"] = year
+		speaker["years"] = years
+		speaker["other_years"] = exceptYear(years, year)
 		speaker["talks"] = talks
 		writeJSON(w, map[string]any{"data": speaker})
 	})
-	mux.HandleFunc("GET /v1/sponsors", func(w http.ResponseWriter, r *http.Request) {
-		q := "SELECT slug, name, website, logo_path, description FROM v1_sponsors"
-		args := []any{}
-		if year := r.URL.Query().Get("year"); year != "" {
-			q += " WHERE slug IN (SELECT sponsor_slug FROM v1_sponsorships WHERE year = $1)"
-			n, _ := strconv.Atoi(year)
-			args = append(args, n)
+	mux.HandleFunc("GET /v1/speakers/{slug}", func(w http.ResponseWriter, r *http.Request) {
+		slug := r.PathValue("slug")
+		speaker, err := loadSpeaker(r.Context(), pool, slug)
+		if err != nil {
+			http.Error(w, `{"error":"not_found"}`, 404)
+			return
 		}
-		q += " ORDER BY name"
-		rows, err := pool.Query(r.Context(), q, args...)
+		talks := loadTalks(r.Context(), pool, slug, nil)
+		speaker["talks"] = talks
+		speaker["years"] = talkYears(r.Context(), pool, slug)
+		writeJSON(w, map[string]any{"data": speaker})
+	})
+	mux.HandleFunc("GET /v1/sponsors", func(w http.ResponseWriter, r *http.Request) {
+		if year := r.URL.Query().Get("year"); year != "" {
+			n, _ := strconv.Atoi(year)
+			rows, err := pool.Query(r.Context(),
+				"SELECT slug, name, website, logo_path, description, blurb, tier, featured, year FROM v1_year_sponsors WHERE year = $1 ORDER BY name", n)
+			if err != nil {
+				http.Error(w, err.Error(), 500)
+				return
+			}
+			defer rows.Close()
+			writeJSON(w, map[string]any{"data": yearSponsorsFromRows(rows)})
+			return
+		}
+		q := "SELECT slug, name, website, logo_path, description FROM v1_sponsors ORDER BY name"
+		rows, err := pool.Query(r.Context(), q)
 		if err != nil {
 			http.Error(w, err.Error(), 500)
 			return
 		}
 		defer rows.Close()
 		writeJSON(w, map[string]any{"data": sponsorsFromRows(rows)})
+	})
+	mux.HandleFunc("GET /v1/sponsors/{year}/{slug}", func(w http.ResponseWriter, r *http.Request) {
+		year, _ := strconv.Atoi(r.PathValue("year"))
+		slug := r.PathValue("slug")
+		var name string
+		var website, logo, desc, blurb, tier *string
+		var featured bool
+		err := pool.QueryRow(r.Context(),
+			"SELECT slug, name, website, logo_path, description, blurb, tier, featured, year FROM v1_year_sponsors WHERE year = $1 AND slug = $2",
+			year, slug).
+			Scan(&slug, &name, &website, &logo, &desc, &blurb, &tier, &featured, &year)
+		if err != nil {
+			http.Error(w, `{"error":"not_found"}`, 404)
+			return
+		}
+		years := sponsorYears(r.Context(), pool, slug)
+		writeJSON(w, map[string]any{"data": map[string]any{
+			"slug": slug, "name": name, "website": website, "logo_path": logo,
+			"description": desc, "blurb": blurb, "tier": tier, "featured": featured,
+			"year": year, "years": years, "other_years": exceptYear(years, year),
+		}})
 	})
 	mux.HandleFunc("GET /v1/sponsors/{slug}", func(w http.ResponseWriter, r *http.Request) {
 		slug := r.PathValue("slug")
@@ -200,6 +230,108 @@ func speakersFromRows(rows rowIter) []map[string]any {
 	for rows.Next() {
 		if s, err := scanSpeaker(rows); err == nil {
 			out = append(out, s)
+		}
+	}
+	if out == nil {
+		out = []map[string]any{}
+	}
+	return out
+}
+
+func loadSpeaker(ctx context.Context, pool *pgxpool.Pool, slug string) (map[string]any, error) {
+	row := pool.QueryRow(ctx,
+		"SELECT slug, first_name, last_name, name, tagline, bio, company, location, photo_path, featured FROM v1_speakers WHERE slug = $1",
+		slug)
+	return scanSpeaker(row)
+}
+
+func loadTalks(ctx context.Context, pool *pgxpool.Pool, slug string, year *int) []map[string]any {
+	q := "SELECT slug, title, description, format, youtube_id, year FROM v1_talks WHERE speaker_slug = $1"
+	args := []any{slug}
+	if year != nil {
+		q += " AND year = $2"
+		args = append(args, *year)
+	}
+	trows, err := pool.Query(ctx, q, args...)
+	if err != nil {
+		return []map[string]any{}
+	}
+	defer trows.Close()
+	talks := []map[string]any{}
+	for trows.Next() {
+		var tslug, title string
+		var desc, format, yt *string
+		var yr int
+		if err := trows.Scan(&tslug, &title, &desc, &format, &yt, &yr); err == nil {
+			talks = append(talks, map[string]any{
+				"slug": tslug, "title": title, "description": desc,
+				"format": format, "youtube_id": yt, "year": yr,
+			})
+		}
+	}
+	return talks
+}
+
+func talkYears(ctx context.Context, pool *pgxpool.Pool, slug string) []int {
+	rows, err := pool.Query(ctx, "SELECT DISTINCT year FROM v1_talks WHERE speaker_slug = $1 ORDER BY year DESC", slug)
+	if err != nil {
+		return []int{}
+	}
+	defer rows.Close()
+	var years []int
+	for rows.Next() {
+		var y int
+		if err := rows.Scan(&y); err == nil {
+			years = append(years, y)
+		}
+	}
+	if years == nil {
+		years = []int{}
+	}
+	return years
+}
+
+func sponsorYears(ctx context.Context, pool *pgxpool.Pool, slug string) []int {
+	rows, err := pool.Query(ctx, "SELECT DISTINCT year FROM v1_sponsorships WHERE sponsor_slug = $1 ORDER BY year DESC", slug)
+	if err != nil {
+		return []int{}
+	}
+	defer rows.Close()
+	var years []int
+	for rows.Next() {
+		var y int
+		if err := rows.Scan(&y); err == nil {
+			years = append(years, y)
+		}
+	}
+	if years == nil {
+		years = []int{}
+	}
+	return years
+}
+
+func exceptYear(years []int, year int) []int {
+	out := []int{}
+	for _, y := range years {
+		if y != year {
+			out = append(out, y)
+		}
+	}
+	return out
+}
+
+func yearSponsorsFromRows(rows rowIter) []map[string]any {
+	var out []map[string]any
+	for rows.Next() {
+		var slug, name string
+		var website, logo, desc, blurb, tier *string
+		var featured bool
+		var year int
+		if err := rows.Scan(&slug, &name, &website, &logo, &desc, &blurb, &tier, &featured, &year); err == nil {
+			out = append(out, map[string]any{
+				"slug": slug, "name": name, "website": website, "logo_path": logo,
+				"description": desc, "blurb": blurb, "tier": tier, "featured": featured, "year": year,
+			})
 		}
 	}
 	if out == nil {
