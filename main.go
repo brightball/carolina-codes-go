@@ -9,8 +9,10 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -34,15 +36,58 @@ var endpoints = []map[string]any{
 	{"method": "GET", "path": "/v1/sponsors/:year/:slug", "query": []string{}},
 }
 
+var (
+	sqlCount     atomic.Int64
+	connectCount atomic.Int64
+)
+
+func resetCounts() {
+	sqlCount.Store(0)
+	connectCount.Store(0)
+}
+
+type querier interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+func dbQuery(ctx context.Context, q querier, sql string, args ...any) (pgx.Rows, error) {
+	sqlCount.Add(1)
+	return q.Query(ctx, sql, args...)
+}
+
+func dbQueryRow(ctx context.Context, q querier, sql string, args ...any) pgx.Row {
+	sqlCount.Add(1)
+	return q.QueryRow(ctx, sql, args...)
+}
+
+func openPool(ctx context.Context, dbURL string) (*pgxpool.Pool, error) {
+	connectCount.Add(1)
+	return pgxpool.New(ctx, dbURL)
+}
+
+func listenAddr(port string) string {
+	return "[::]:" + port
+}
+
 func main() {
 	ctx := context.Background()
 	dbURL := getenv("DATABASE_URL", "postgres://postgres:postgres@127.0.0.1:5432/carolina_dev")
-	pool, err := pgxpool.New(ctx, dbURL)
+	pool, err := openPool(ctx, dbURL)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer pool.Close()
 
+	handler := newHandler(pool)
+
+	port := getenv("PORT", "4002")
+	go register(port)
+	log.Printf("carolina-codes-go listening on :%s", port)
+	log.Fatal(http.ListenAndServe(listenAddr(port), handler))
+}
+
+func newHandler(pool querier) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
@@ -50,20 +95,20 @@ func main() {
 			return
 		}
 		writeJSON(w, map[string]any{
-			"language":          language,
-			"language_version":  runtime.Version(),
-			"api_version":       apiVersion,
-			"framework":         framework,
-			"created_year":      createdYear,
-			"schema_version":    schemaVersion,
-			"endpoints":         endpoints,
+			"language":         language,
+			"language_version": runtime.Version(),
+			"api_version":      apiVersion,
+			"framework":        framework,
+			"created_year":     createdYear,
+			"schema_version":   schemaVersion,
+			"endpoints":        endpoints,
 		})
 	})
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"ok": true})
 	})
 	mux.HandleFunc("GET /v1/years", func(w http.ResponseWriter, r *http.Request) {
-		rows, err := pool.Query(r.Context(), "SELECT year, slug, name, status FROM v1_years ORDER BY year DESC")
+		rows, err := dbQuery(r.Context(), pool, "SELECT year, slug, name, status FROM v1_years ORDER BY year DESC")
 		if err != nil {
 			http.Error(w, err.Error(), 500)
 			return
@@ -82,25 +127,15 @@ func main() {
 		writeJSON(w, map[string]any{"data": out})
 	})
 	mux.HandleFunc("GET /v1/speakers", func(w http.ResponseWriter, r *http.Request) {
-		q := "SELECT " + speakerColumns + " FROM v1_speakers"
-		args := []any{}
 		var year *int
 		if raw := r.URL.Query().Get("year"); raw != "" {
-			q += " WHERE slug IN (SELECT speaker_slug FROM v1_talks WHERE year = $1)"
 			n, _ := strconv.Atoi(raw)
 			year = &n
-			args = append(args, n)
 		}
-		q += " ORDER BY last_name, first_name"
-		rows, err := pool.Query(r.Context(), q, args...)
+		out, err := listSpeakers(r.Context(), pool, year)
 		if err != nil {
 			http.Error(w, err.Error(), 500)
 			return
-		}
-		defer rows.Close()
-		out := speakersFromRows(rows)
-		if year != nil {
-			out = attachYearTags(r.Context(), pool, out, *year)
 		}
 		writeJSON(w, map[string]any{"data": out})
 	})
@@ -141,8 +176,8 @@ func main() {
 	mux.HandleFunc("GET /v1/sponsors", func(w http.ResponseWriter, r *http.Request) {
 		if year := r.URL.Query().Get("year"); year != "" {
 			n, _ := strconv.Atoi(year)
-			rows, err := pool.Query(r.Context(),
-				"SELECT slug, name, website, logo_path, description, blurb, tier, featured, year FROM v1_year_sponsors WHERE year = $1 ORDER BY name", n)
+			rows, err := dbQuery(r.Context(), pool,
+				"SELECT "+yearSponsorColumns+" FROM v1_year_sponsors WHERE year = $1 ORDER BY name", n)
 			if err != nil {
 				http.Error(w, err.Error(), 500)
 				return
@@ -151,8 +186,7 @@ func main() {
 			writeJSON(w, map[string]any{"data": yearSponsorsFromRows(rows)})
 			return
 		}
-		q := "SELECT slug, name, website, logo_path, description FROM v1_sponsors ORDER BY name"
-		rows, err := pool.Query(r.Context(), q)
+		rows, err := dbQuery(r.Context(), pool, "SELECT "+sponsorColumns+" FROM v1_sponsors ORDER BY name")
 		if err != nil {
 			http.Error(w, err.Error(), 500)
 			return
@@ -163,50 +197,31 @@ func main() {
 	mux.HandleFunc("GET /v1/sponsors/{year}/{slug}", func(w http.ResponseWriter, r *http.Request) {
 		year, _ := strconv.Atoi(r.PathValue("year"))
 		slug := r.PathValue("slug")
-		var name string
-		var website, logo, desc, blurb, tier *string
-		var featured bool
-		err := pool.QueryRow(r.Context(),
-			"SELECT slug, name, website, logo_path, description, blurb, tier, featured, year FROM v1_year_sponsors WHERE year = $1 AND slug = $2",
-			year, slug).
-			Scan(&slug, &name, &website, &logo, &desc, &blurb, &tier, &featured, &year)
+		sponsor, err := loadYearSponsor(r.Context(), pool, year, slug)
 		if err != nil {
 			http.Error(w, `{"error":"not_found"}`, 404)
 			return
 		}
 		years := sponsorYears(r.Context(), pool, slug)
-		writeJSON(w, map[string]any{"data": map[string]any{
-			"slug": slug, "name": name, "website": website, "logo_path": logo,
-			"description": desc, "blurb": blurb, "tier": tier, "featured": featured,
-			"year": year, "years": years, "other_years": exceptYear(years, year),
-		}})
+		sponsor["years"] = years
+		sponsor["other_years"] = exceptYear(years, year)
+		writeJSON(w, map[string]any{"data": sponsor})
 	})
 	mux.HandleFunc("GET /v1/sponsors/{slug}", func(w http.ResponseWriter, r *http.Request) {
 		slug := r.PathValue("slug")
-		var name string
-		var website, logo, desc *string
-		err := pool.QueryRow(r.Context(),
-			"SELECT slug, name, website, logo_path, description FROM v1_sponsors WHERE slug = $1", slug).
-			Scan(&slug, &name, &website, &logo, &desc)
+		sponsor, err := loadSponsor(r.Context(), pool, slug)
 		if err != nil {
 			http.Error(w, `{"error":"not_found"}`, 404)
 			return
 		}
-		writeJSON(w, map[string]any{"data": map[string]any{
-			"slug": slug, "name": name, "website": website, "logo_path": logo, "description": desc,
-		}})
+		writeJSON(w, map[string]any{"data": sponsor})
 	})
 
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Polyglot-Language", language)
 		w.Header().Set("X-Polyglot-Framework", framework)
 		mux.ServeHTTP(w, r)
 	})
-
-	port := getenv("PORT", "4002")
-	go register(port)
-	log.Printf("carolina-codes-go listening on :%s", port)
-	log.Fatal(http.ListenAndServe(":"+port, handler))
 }
 
 type scanner interface {
@@ -248,21 +263,21 @@ func speakersFromRows(rows rowIter) []map[string]any {
 	return out
 }
 
-func loadSpeaker(ctx context.Context, pool *pgxpool.Pool, slug string) (map[string]any, error) {
-	row := pool.QueryRow(ctx,
+func loadSpeaker(ctx context.Context, q querier, slug string) (map[string]any, error) {
+	row := dbQueryRow(ctx, q,
 		"SELECT "+speakerColumns+" FROM v1_speakers WHERE slug = $1",
 		slug)
 	return scanSpeaker(row)
 }
 
-func loadTalks(ctx context.Context, pool *pgxpool.Pool, slug string, year *int) []map[string]any {
-	q := "SELECT slug, title, description, format, youtube_id, year, languages, topics FROM v1_talks WHERE speaker_slug = $1"
+func loadTalks(ctx context.Context, q querier, slug string, year *int) []map[string]any {
+	query := "SELECT slug, title, description, format, youtube_id, year, languages, topics FROM v1_talks WHERE speaker_slug = $1"
 	args := []any{slug}
 	if year != nil {
-		q += " AND year = $2"
+		query += " AND year = $2"
 		args = append(args, *year)
 	}
-	trows, err := pool.Query(ctx, q, args...)
+	trows, err := dbQuery(ctx, q, query, args...)
 	if err != nil {
 		return []map[string]any{}
 	}
@@ -290,17 +305,108 @@ func loadTalks(ctx context.Context, pool *pgxpool.Pool, slug string, year *int) 
 	return talks
 }
 
-func attachYearTags(ctx context.Context, pool *pgxpool.Pool, speakers []map[string]any, year int) []map[string]any {
+func listSpeakers(ctx context.Context, q querier, year *int) ([]map[string]any, error) {
+	query := "SELECT " + speakerColumns + " FROM v1_speakers"
+	args := []any{}
+	if year != nil {
+		query += " WHERE slug IN (SELECT speaker_slug FROM v1_talks WHERE year = $1)"
+		args = append(args, *year)
+	}
+	query += " ORDER BY last_name, first_name"
+	rows, err := dbQuery(ctx, q, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := speakersFromRows(rows)
+	if year != nil {
+		out = attachYearTags(ctx, q, out, *year)
+	}
+	return out, nil
+}
+
+func attachYearTags(ctx context.Context, q querier, speakers []map[string]any, year int) []map[string]any {
+	if len(speakers) == 0 {
+		return speakers
+	}
+	slugs := make([]string, 0, len(speakers))
 	for _, speaker := range speakers {
 		slug, _ := speaker["slug"].(string)
-		talks := loadTalks(ctx, pool, slug, &year)
+		slugs = append(slugs, slug)
+	}
+	talksBy := loadTalksForYear(ctx, q, year)
+	yearsBy := loadYearsForSlugs(ctx, q, slugs)
+	for _, speaker := range speakers {
+		slug, _ := speaker["slug"].(string)
+		talks := talksBy[slug]
+		if talks == nil {
+			talks = []map[string]any{}
+		}
+		years := yearsBy[slug]
+		if years == nil {
+			years = []int{}
+		}
 		speaker["year"] = year
 		speaker["talks"] = talks
 		speaker["languages"] = uniqTalkField(talks, "languages")
 		speaker["topics"] = uniqTalkField(talks, "topics")
-		speaker["years"] = talkYears(ctx, pool, slug)
+		speaker["years"] = years
 	}
 	return speakers
+}
+
+func loadTalksForYear(ctx context.Context, q querier, year int) map[string][]map[string]any {
+	rows, err := dbQuery(ctx, q,
+		"SELECT slug, title, description, format, youtube_id, year, speaker_slug, languages, topics FROM v1_talks WHERE year = $1 ORDER BY speaker_slug, year DESC",
+		year)
+	out := map[string][]map[string]any{}
+	if err != nil {
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var tslug, title, speakerSlug string
+		var desc, format, yt *string
+		var yr int
+		var langs, topics []string
+		if err := rows.Scan(&tslug, &title, &desc, &format, &yt, &yr, &speakerSlug, &langs, &topics); err != nil {
+			continue
+		}
+		if langs == nil {
+			langs = []string{}
+		}
+		if topics == nil {
+			topics = []string{}
+		}
+		out[speakerSlug] = append(out[speakerSlug], map[string]any{
+			"slug": tslug, "title": title, "description": desc,
+			"format": format, "youtube_id": yt, "year": yr,
+			"speaker_slug": speakerSlug, "languages": langs, "topics": topics,
+		})
+	}
+	return out
+}
+
+func loadYearsForSlugs(ctx context.Context, q querier, slugs []string) map[string][]int {
+	out := map[string][]int{}
+	if len(slugs) == 0 {
+		return out
+	}
+	rows, err := dbQuery(ctx, q,
+		"SELECT DISTINCT speaker_slug, year FROM v1_talks WHERE speaker_slug = ANY($1::text[]) ORDER BY speaker_slug, year DESC",
+		slugs)
+	if err != nil {
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var slug string
+		var year int
+		if err := rows.Scan(&slug, &year); err == nil {
+			out[slug] = append(out[slug], year)
+		}
+	}
+	return out
 }
 
 func uniqTalkField(talks []map[string]any, key string) []string {
@@ -325,8 +431,8 @@ func uniqTalkField(talks []map[string]any, key string) []string {
 	return out
 }
 
-func talkYears(ctx context.Context, pool *pgxpool.Pool, slug string) []int {
-	rows, err := pool.Query(ctx, "SELECT DISTINCT year FROM v1_talks WHERE speaker_slug = $1 ORDER BY year DESC", slug)
+func talkYears(ctx context.Context, q querier, slug string) []int {
+	rows, err := dbQuery(ctx, q, "SELECT DISTINCT year FROM v1_talks WHERE speaker_slug = $1 ORDER BY year DESC", slug)
 	if err != nil {
 		return []int{}
 	}
@@ -344,8 +450,8 @@ func talkYears(ctx context.Context, pool *pgxpool.Pool, slug string) []int {
 	return years
 }
 
-func sponsorYears(ctx context.Context, pool *pgxpool.Pool, slug string) []int {
-	rows, err := pool.Query(ctx, "SELECT DISTINCT year FROM v1_sponsorships WHERE sponsor_slug = $1 ORDER BY year DESC", slug)
+func sponsorYears(ctx context.Context, q querier, slug string) []int {
+	rows, err := dbQuery(ctx, q, "SELECT DISTINCT year FROM v1_sponsorships WHERE sponsor_slug = $1 ORDER BY year DESC", slug)
 	if err != nil {
 		return []int{}
 	}
@@ -373,18 +479,53 @@ func exceptYear(years []int, year int) []int {
 	return out
 }
 
+const yearSponsorColumns = "slug, name, website, logo_path, description, blurb, tier, featured, year, twitter_url, linkedin_url, youtube_url, instagram_url, facebook_url"
+const sponsorColumns = "slug, name, website, logo_path, description, twitter_url, linkedin_url, youtube_url, instagram_url, facebook_url"
+
+func scanYearSponsor(row scanner) (map[string]any, error) {
+	var slug, name string
+	var website, logo, desc, blurb, tier, twitter, linkedin, youtube, instagram, facebook *string
+	var featured bool
+	var year int
+	if err := row.Scan(&slug, &name, &website, &logo, &desc, &blurb, &tier, &featured, &year, &twitter, &linkedin, &youtube, &instagram, &facebook); err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"slug": slug, "name": name, "website": website, "logo_path": logo,
+		"description": desc, "blurb": blurb, "tier": tier, "featured": featured, "year": year,
+		"twitter_url": twitter, "linkedin_url": linkedin, "youtube_url": youtube,
+		"instagram_url": instagram, "facebook_url": facebook,
+	}, nil
+}
+
+func scanSponsor(row scanner) (map[string]any, error) {
+	var slug, name string
+	var website, logo, desc, twitter, linkedin, youtube, instagram, facebook *string
+	if err := row.Scan(&slug, &name, &website, &logo, &desc, &twitter, &linkedin, &youtube, &instagram, &facebook); err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"slug": slug, "name": name, "website": website, "logo_path": logo, "description": desc,
+		"twitter_url": twitter, "linkedin_url": linkedin, "youtube_url": youtube,
+		"instagram_url": instagram, "facebook_url": facebook,
+	}, nil
+}
+
+func loadYearSponsor(ctx context.Context, q querier, year int, slug string) (map[string]any, error) {
+	row := dbQueryRow(ctx, q, "SELECT "+yearSponsorColumns+" FROM v1_year_sponsors WHERE year = $1 AND slug = $2", year, slug)
+	return scanYearSponsor(row)
+}
+
+func loadSponsor(ctx context.Context, q querier, slug string) (map[string]any, error) {
+	row := dbQueryRow(ctx, q, "SELECT "+sponsorColumns+" FROM v1_sponsors WHERE slug = $1", slug)
+	return scanSponsor(row)
+}
+
 func yearSponsorsFromRows(rows rowIter) []map[string]any {
 	var out []map[string]any
 	for rows.Next() {
-		var slug, name string
-		var website, logo, desc, blurb, tier *string
-		var featured bool
-		var year int
-		if err := rows.Scan(&slug, &name, &website, &logo, &desc, &blurb, &tier, &featured, &year); err == nil {
-			out = append(out, map[string]any{
-				"slug": slug, "name": name, "website": website, "logo_path": logo,
-				"description": desc, "blurb": blurb, "tier": tier, "featured": featured, "year": year,
-			})
+		if s, err := scanYearSponsor(rows); err == nil {
+			out = append(out, s)
 		}
 	}
 	if out == nil {
@@ -396,12 +537,8 @@ func yearSponsorsFromRows(rows rowIter) []map[string]any {
 func sponsorsFromRows(rows rowIter) []map[string]any {
 	var out []map[string]any
 	for rows.Next() {
-		var slug, name string
-		var website, logo, desc *string
-		if err := rows.Scan(&slug, &name, &website, &logo, &desc); err == nil {
-			out = append(out, map[string]any{
-				"slug": slug, "name": name, "website": website, "logo_path": logo, "description": desc,
-			})
+		if s, err := scanSponsor(rows); err == nil {
+			out = append(out, s)
 		}
 	}
 	if out == nil {
@@ -423,14 +560,14 @@ func register(port string) {
 	}
 	base := getenv("PUBLIC_BASE_URL", "http://127.0.0.1:"+port)
 	body, _ := json.Marshal(map[string]any{
-		"language":          language,
-		"language_version":  runtime.Version(),
-		"api_version":       apiVersion,
-		"framework":         framework,
-		"created_year":      createdYear,
-		"schema_version":    schemaVersion,
-		"base_url":          base,
-		"endpoints":         endpoints,
+		"language":         language,
+		"language_version": runtime.Version(),
+		"api_version":      apiVersion,
+		"framework":        framework,
+		"created_year":     createdYear,
+		"schema_version":   schemaVersion,
+		"base_url":         base,
+		"endpoints":        endpoints,
 	})
 	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(url, "/")+"/internal/api-endpoints/register", strings.NewReader(string(body)))
 	if err != nil {
