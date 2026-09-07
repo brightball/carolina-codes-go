@@ -1,0 +1,14 @@
+{
+  "name": "carolina-codes-go",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": "."
+  },
+  "install": "go mod tidy",
+  "ports": [
+    {
+      "name": "api",
+      "port": 4002
+    }
+  ]
+}
