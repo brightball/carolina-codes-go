@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"runtime"
 	"strconv"
@@ -62,29 +64,64 @@ func dbQueryRow(ctx context.Context, q querier, sql string, args ...any) pgx.Row
 }
 
 func openPool(ctx context.Context, dbURL string) (*pgxpool.Pool, error) {
+	cfg, err := poolConfig(dbURL)
+	if err != nil {
+		return nil, err
+	}
 	connectCount.Add(1)
-	return pgxpool.New(ctx, dbURL)
+	return pgxpool.NewWithConfig(ctx, cfg)
+}
+
+// poolConfig is the pool the server starts with. MinConns stays 0 so process
+// start does not dial. MaxConns is capped for one shared CPU even when
+// GOMAXPROCS or the URL asks for more, and ConnectTimeout bounds a dead socket.
+func poolConfig(dbURL string) (*pgxpool.Config, error) {
+	cfg, err := pgxpool.ParseConfig(dbURL)
+	if err != nil {
+		return nil, err
+	}
+	cfg.MinConns = 0
+	cfg.MinIdleConns = 0
+	cfg.MaxConns = 4
+	const connectTimeout = 5 * time.Second
+	cfg.ConnConfig.ConnectTimeout = connectTimeout
+	cfg.ConnConfig.DialFunc = (&net.Dialer{Timeout: connectTimeout}).DialContext
+	return cfg, nil
 }
 
 func listenAddr(port string) string {
 	return "[::]:" + port
 }
 
+func newServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+}
+
+func boot(dbURL, port string) (*http.Server, *pgxpool.Pool, error) {
+	pool, err := openPool(context.Background(), dbURL)
+	if err != nil {
+		return nil, nil, err
+	}
+	go register(port)
+	return newServer(listenAddr(port), newHandler(pool)), pool, nil
+}
+
 func main() {
-	ctx := context.Background()
+	port := getenv("PORT", "4002")
 	dbURL := getenv("DATABASE_URL", "postgres://postgres:postgres@127.0.0.1:5432/carolina_dev")
-	pool, err := openPool(ctx, dbURL)
+	srv, pool, err := boot(dbURL, port)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer pool.Close()
-
-	handler := newHandler(pool)
-
-	port := getenv("PORT", "4002")
-	go register(port)
-	log.Printf("carolina-codes-go listening on :%s", port)
-	log.Fatal(http.ListenAndServe(listenAddr(port), handler))
+	log.Printf("carolina-codes-go listening on %s", srv.Addr)
+	log.Fatal(srv.ListenAndServe())
 }
 
 func newHandler(pool querier) http.Handler {
@@ -553,11 +590,23 @@ func writeJSON(w http.ResponseWriter, v any) {
 }
 
 func register(port string) {
-	url := os.Getenv("CAROLINA_URL")
+	raw := os.Getenv("CAROLINA_URL")
 	token := os.Getenv("POLYGLOT_REGISTER_TOKEN")
-	if url == "" || token == "" {
+	if raw == "" || token == "" {
 		return
 	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		log.Printf("register: invalid CAROLINA_URL")
+		return
+	}
+	// Rebuild from validated scheme/host and a constant path so request
+	// input cannot steer the CMS registration URL.
+	endpoint := (&url.URL{
+		Scheme: parsed.Scheme,
+		Host:   parsed.Host,
+		Path:   "/internal/api-endpoints/register",
+	}).String()
 	base := getenv("PUBLIC_BASE_URL", "http://127.0.0.1:"+port)
 	body, _ := json.Marshal(map[string]any{
 		"language":         language,
@@ -569,7 +618,7 @@ func register(port string) {
 		"base_url":         base,
 		"endpoints":        endpoints,
 	})
-	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(url, "/")+"/internal/api-endpoints/register", strings.NewReader(string(body)))
+	req, err := http.NewRequest(http.MethodPost, endpoint, strings.NewReader(string(body)))
 	if err != nil {
 		log.Printf("register: %v", err)
 		return
@@ -582,8 +631,9 @@ func register(port string) {
 		log.Printf("register: %v", err)
 		return
 	}
-	defer resp.Body.Close()
-	log.Printf("registered with elixir: %s", resp.Status)
+	defer func() { _ = resp.Body.Close() }()
+	status := strings.ReplaceAll(strings.ReplaceAll(resp.Status, "\n", ""), "\r", "")
+	log.Printf("registered with elixir: %s", status)
 }
 
 func getenv(key, fallback string) string {

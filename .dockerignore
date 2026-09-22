@@ -1,0 +1,5 @@
+.git
+.gitea
+.githooks
+.cursor
+*.log

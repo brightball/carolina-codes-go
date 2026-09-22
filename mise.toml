@@ -1,2 +1,34 @@
 [tools]
-go = "1.23"
+go = "1.25.14"
+gitleaks = "8.30.1"
+golangci-lint = "2.13.2"
+"go:github.com/securego/gosec/v2/cmd/gosec" = "v2.29.0"
+"go:golang.org/x/vuln/cmd/govulncheck" = "v1.8.0"
+
+[tasks.test]
+description = "Run the Go test suite"
+run = "make test"
+
+[tasks.sast]
+description = "Static application security analysis (gosec)"
+run = "make sast"
+
+[tasks.vuln]
+description = "Scan module dependencies with govulncheck"
+run = "make vuln"
+
+[tasks.gitleaks]
+description = "Scan for secrets with gitleaks"
+run = "make gitleaks"
+
+[tasks.lint]
+description = "Lint and format-check with golangci-lint"
+run = "make lint"
+
+[tasks.check]
+description = "Run test, SAST, govulncheck, gitleaks, and lint"
+run = "make check"
+
+[tasks.hooks]
+description = "Install pre-commit hooks so git commit runs the five checks"
+run = "make hooks"

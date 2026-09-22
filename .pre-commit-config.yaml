@@ -1,0 +1,35 @@
+# Local pre-commit hooks. Emergency escape: SKIP=test,sast,vuln,gitleaks,lint git commit
+# Install once: make hooks   (or: pre-commit install)
+repos:
+  - repo: local
+    hooks:
+      - id: test
+        name: go test
+        language: system
+        entry: make test
+        pass_filenames: false
+        always_run: true
+      - id: sast
+        name: gosec
+        language: system
+        entry: make sast
+        pass_filenames: false
+        always_run: true
+      - id: vuln
+        name: govulncheck
+        language: system
+        entry: make vuln
+        pass_filenames: false
+        always_run: true
+      - id: gitleaks
+        name: gitleaks
+        language: system
+        entry: make gitleaks
+        pass_filenames: false
+        always_run: true
+      - id: lint
+        name: golangci-lint
+        language: system
+        entry: make lint
+        pass_filenames: false
+        always_run: true

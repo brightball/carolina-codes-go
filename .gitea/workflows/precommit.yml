@@ -1,0 +1,135 @@
+# First-stage prepare job clones GITHUB_SHA and installs quality-gate tools
+# once, then exports that tree as a Gitea artifact. Check jobs restore it
+# and run only their command. They do not re-clone or re-install.
+#
+# Empty runner image: clone GITHUB_SHA with the job token over HTTPS.
+# Gitea git HTTP returns 401 without the token. Do not initialize a new
+# repository or set a default-branch git config here. The five checks
+# need prepare only (not each other). The test job supplies Postgres 16
+# for livePool tests.
+#
+# Artifacts are uploaded with curl against Gitea's artifact API. The
+# golang:1.25-bookworm image has no Node (JS upload-artifact would fail)
+# and the job token cannot publish OCI packages.
+name: precommit
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: precommit-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GITHUB_TOKEN: ${{ github.token }}
+
+# Shared restore step. Not a job. YAML anchor so check jobs do not each
+# re-clone or go-install; they download the prepared-env artifact.
+x-restore-prepared-env: &restore-prepared-env
+  run: |
+    set -euo pipefail
+    token="${GITHUB_TOKEN:-${GITEA_TOKEN:-}}"
+    if [ -z "$token" ]; then echo "missing job token" >&2; exit 1; fi
+    out=/tmp/ci-env.sh
+    api="${GITHUB_SERVER_URL%/}/api/v1/repos/${GITHUB_REPOSITORY}/raw/scripts/ci-env.sh?ref=${GITHUB_SHA}"
+    if ! curl -fsSL -H "Authorization: token ${token}" "$api" -o "$out" || ! grep -q cmd_restore "$out"; then
+      host="${GITHUB_SERVER_URL#https://}"
+      host="${host#http://}"
+      scheme=https
+      case "${GITHUB_SERVER_URL}" in http://*) scheme=http ;; esac
+      curl -fsSL "${scheme}://x-access-token:${token}@${host}/${GITHUB_REPOSITORY}/raw/commit/${GITHUB_SHA}/scripts/ci-env.sh" -o "$out"
+    fi
+    grep -q cmd_restore "$out"
+    bash /tmp/ci-env.sh restore
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    container:
+      image: docker.io/library/golang:1.25-bookworm
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - run: |
+          token="${GITHUB_TOKEN:-${GITEA_TOKEN:-}}"
+          if [ -z "$token" ]; then echo "missing job token for git fetch" >&2; exit 1; fi
+          host="${GITHUB_SERVER_URL#https://}"
+          host="${host#http://}"
+          git clone --depth 1 --no-checkout "https://x-access-token:${token}@${host}/${GITHUB_REPOSITORY}" .
+          git fetch --depth 1 origin "${GITHUB_SHA}"
+          git checkout --force FETCH_HEAD
+      - run: bash scripts/ci-env.sh prepare
+
+  test:
+    needs: prepare
+    runs-on: ubuntu-latest
+    container:
+      image: docker.io/library/golang:1.25-bookworm
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: carolina_dev
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      PGHOST: postgres
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      PGDATABASE: carolina_dev
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/carolina_dev?sslmode=disable
+    steps:
+      - *restore-prepared-env
+      - run: go test -race ./...
+
+  sast:
+    needs: prepare
+    runs-on: ubuntu-latest
+    container:
+      image: docker.io/library/golang:1.25-bookworm
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - *restore-prepared-env
+      - run: gosec ./...
+
+  vuln:
+    needs: prepare
+    runs-on: ubuntu-latest
+    container:
+      image: docker.io/library/golang:1.25-bookworm
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - *restore-prepared-env
+      - run: govulncheck ./...
+
+  gitleaks:
+    needs: prepare
+    runs-on: ubuntu-latest
+    container:
+      image: docker.io/library/golang:1.25-bookworm
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - *restore-prepared-env
+      - run: gitleaks detect --source .
+
+  lint:
+    needs: prepare
+    runs-on: ubuntu-latest
+    container:
+      image: docker.io/library/golang:1.25-bookworm
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - *restore-prepared-env
+      - run: golangci-lint run

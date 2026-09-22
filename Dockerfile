@@ -1,13 +1,15 @@
-FROM golang:1.23-alpine AS build
+FROM golang:1.25-alpine AS build
 WORKDIR /src
-COPY go.mod go.sum* ./
+COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -o /out/api .
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/api .
 
-FROM alpine:3.20
-WORKDIR /app
-COPY --from=build /out/api /app/api
-ENV PORT=8080
+FROM scratch
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=build /out/api /api
+ENV PORT=8080 \
+    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 EXPOSE 8080
-CMD ["/app/api"]
+USER 65534:65534
+ENTRYPOINT ["/api"]

@@ -8,6 +8,8 @@ primary_region = "iad"
 
 [env]
   PORT = "8080"
+  GOMAXPROCS = "1"
+  GOMEMLIMIT = "200MiB"
   CAROLINA_URL = "http://carolina-codes.internal:8080"
   PUBLIC_BASE_URL = "https://carolina-codes-go.fly.dev"
 
