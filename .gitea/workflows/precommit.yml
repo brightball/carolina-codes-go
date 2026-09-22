@@ -28,7 +28,8 @@ env:
 # re-clone or go-install; they download the prepared-env artifact.
 x-restore-prepared-env: &restore-prepared-env
   run: |
-    set -euo pipefail
+    # act_runner executes steps with sh, which rejects pipefail.
+    set -eu
     token="${GITHUB_TOKEN:-${GITEA_TOKEN:-}}"
     if [ -z "$token" ]; then echo "missing job token" >&2; exit 1; fi
     out=/tmp/ci-env.sh
