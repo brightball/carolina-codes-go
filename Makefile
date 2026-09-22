@@ -17,7 +17,7 @@ sast:
 	gosec ./...
 
 vuln:
-	@command -v govulncheck >/dev/null || go install golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION)
+	@command -v govulncheck >/dev/null || GOTOOLCHAIN=auto go install golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION)
 	govulncheck ./...
 
 gitleaks:
@@ -25,7 +25,7 @@ gitleaks:
 	gitleaks detect --source .
 
 lint:
-	@command -v golangci-lint >/dev/null || go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
+	@command -v golangci-lint >/dev/null || GOTOOLCHAIN=auto go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
 	golangci-lint run
 
 check: test sast vuln gitleaks lint
