@@ -2,6 +2,8 @@
 
 Read-only `net/http` + `pgx` API for the Carolina Code Conference polyglot site.
 
+Language **Go 1.25** (`go 1.25.0` in `go.mod`, mise pin `1.25.14`, container image `golang:1.25`). The framework is standard-library `net/http` and has no separate module version. SQL is `github.com/jackc/pgx/v5` at `v5.9.2`.
+
 Queries PostgreSQL **v1 views**. Listens before dialing Postgres, and registers with Elixir in the background.
 
 ```bash
