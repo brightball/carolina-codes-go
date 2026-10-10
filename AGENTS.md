@@ -27,10 +27,10 @@ The contract is the CMS `priv/api/openapi.yaml` plus `priv/api/AGENTS.md`. This 
 
 | Piece | Shipped choice |
 | --- | --- |
-| Language | Go 1.25 (`go 1.25.0` in `go.mod`, mise pin `1.25.14`, image `golang:1.25`) |
+| Language | Go 1.26 (`go 1.26.9` in `go.mod`, mise pin `1.26.9`, image `golang:1.26.9`) |
 | Framework | Standard-library `net/http` (`http.NewServeMux`). Not gin, echo, or chi. `net/http` has no module version. |
 | SQL | `github.com/jackc/pgx/v5` |
-| Image | `golang:1.25` build to a static non-root `scratch` binary (`CGO_ENABLED=0`, `USER 65534:65534`) |
+| Image | `golang:1.26.9` build to a static non-root `scratch` binary (`CGO_ENABLED=0`, `USER 65534:65534`) |
 | Listen | `[::]` so Fly 6PN can connect. Local default port is 4002. The container and Fly port is 8080. |
 
 The process listens without waiting on a Postgres ping or registration. The pool uses `MinConns` 0 and a capped `MaxConns`. Health does not touch the database.
@@ -84,7 +84,7 @@ Registration runs in the background after the pool is configured. If `CAROLINA_U
 
 ## Fly
 
-Stay scale-to-zero. `auto_stop_machines = "stop"` (not suspend), `min_machines_running = 0`, 256mb, `GOMAXPROCS=1`, `GOMEMLIMIT=200MiB`. The HTTP check is `GET /health` on port 8080. Do not deploy from a docs-only change unless asked.
+Stay scale-to-zero. `auto_stop_machines = "suspend"`, `min_machines_running = 0`, 256mb, `GOMAXPROCS=1`, `GOMEMLIMIT=200MiB`. The HTTP check is `GET /health` on port 8080. Do not deploy from a docs-only change unless asked.
 
 ## Quality gates
 
@@ -99,8 +99,8 @@ Stay scale-to-zero. `auto_stop_machines = "stop"` (not suspend), `min_machines_r
 | `MEMORY.md` | Operational facts (not decisions) |
 | `README.md` | Install, versions, run, and test commands |
 | `main.go` | `net/http` server, pgx pool, routes, register |
-| `go.mod` | Module path, `go 1.25.0`, `github.com/jackc/pgx/v5` |
-| `Dockerfile` | `golang:1.25` to static non-root `scratch` |
+| `go.mod` | Module path, `go 1.26.9`, `github.com/jackc/pgx/v5` |
+| `Dockerfile` | `golang:1.26.9` to static non-root `scratch` |
 | `fly.toml` | Scale-to-zero Fly config |
 | `Makefile`, `mise.toml` | Quality-gate pins and tasks |
 

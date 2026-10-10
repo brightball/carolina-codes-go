@@ -9,7 +9,7 @@
 # for livePool tests.
 #
 # Artifacts are uploaded with curl against Gitea's artifact API. The
-# golang:1.25-bookworm image has no Node (JS upload-artifact would fail)
+# golang:1.26.9-bookworm image has no Node (JS upload-artifact would fail)
 # and the job token cannot publish OCI packages.
 name: precommit
 
@@ -48,7 +48,7 @@ jobs:
   prepare:
     runs-on: ubuntu-latest
     container:
-      image: docker.io/library/golang:1.25-bookworm
+      image: docker.io/library/golang:1.26.9-bookworm
       env:
         GITHUB_TOKEN: ${{ github.token }}
     steps:
@@ -66,7 +66,7 @@ jobs:
     needs: prepare
     runs-on: ubuntu-latest
     container:
-      image: docker.io/library/golang:1.25-bookworm
+      image: docker.io/library/golang:1.26.9-bookworm
       env:
         GITHUB_TOKEN: ${{ github.token }}
     services:
@@ -95,7 +95,7 @@ jobs:
     needs: prepare
     runs-on: ubuntu-latest
     container:
-      image: docker.io/library/golang:1.25-bookworm
+      image: docker.io/library/golang:1.26.9-bookworm
       env:
         GITHUB_TOKEN: ${{ github.token }}
     steps:
@@ -106,7 +106,7 @@ jobs:
     needs: prepare
     runs-on: ubuntu-latest
     container:
-      image: docker.io/library/golang:1.25-bookworm
+      image: docker.io/library/golang:1.26.9-bookworm
       env:
         GITHUB_TOKEN: ${{ github.token }}
     steps:
@@ -117,7 +117,7 @@ jobs:
     needs: prepare
     runs-on: ubuntu-latest
     container:
-      image: docker.io/library/golang:1.25-bookworm
+      image: docker.io/library/golang:1.26.9-bookworm
       env:
         GITHUB_TOKEN: ${{ github.token }}
     steps:
@@ -128,7 +128,7 @@ jobs:
     needs: prepare
     runs-on: ubuntu-latest
     container:
-      image: docker.io/library/golang:1.25-bookworm
+      image: docker.io/library/golang:1.26.9-bookworm
       env:
         GITHUB_TOKEN: ${{ github.token }}
     steps:

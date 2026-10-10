@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Prepare/restore the Gitea CI workspace without Node or an OCI push.
 #
-# The golang:1.25-bookworm job image has no Node, so actions/upload-artifact
+# The golang:1.26.9-bookworm job image has no Node, so actions/upload-artifact
 # cannot run inside it. Gitea job tokens also cannot publish container
 # packages. This helper talks to Gitea's artifact API with curl instead.
 set -euo pipefail
@@ -66,8 +66,8 @@ cmd_install() {
   echo "fetching Go modules and installing quality-gate tools"
   go mod download
   go install github.com/securego/gosec/v2/cmd/gosec@v2.29.0
-  # These two modules declare go 1.26. The job image is Go 1.25 with
-  # GOTOOLCHAIN=local, so allow a toolchain download for the build only.
+  # These two modules declare go 1.26. The job image is Go 1.26.9.
+  # GOTOOLCHAIN=auto still allows a toolchain download if a tool's go line is newer.
   GOTOOLCHAIN=auto go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
   go install github.com/zricethezav/gitleaks/v8@v8.30.1
   GOTOOLCHAIN=auto go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2

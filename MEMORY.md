@@ -30,4 +30,4 @@ CMS `priv/api/openapi.yaml` and `priv/api/AGENTS.md`. This repo does not vendor 
 
 ## Versions
 
-Go 1.25 (`go 1.25.0` in `go.mod`, mise pin `1.25.14`, image `golang:1.25`). HTTP is standard-library `net/http` and has no separate module version. SQL is `github.com/jackc/pgx/v5` at `v5.9.2`.
+Go 1.26 (`go 1.26.9` in `go.mod`, mise pin `1.26.9`, image `golang:1.26.9`). HTTP is standard-library `net/http` and has no separate module version. SQL is `github.com/jackc/pgx/v5` at `v5.9.2`. `golang.org/x/text` is `v0.41.0`.

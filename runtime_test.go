@@ -168,11 +168,11 @@ func TestMainUsesBootWithoutPing(t *testing.T) {
 
 func TestFlyRuntimeStaysScaleToZero(t *testing.T) {
 	body := string(readRepo(t, "fly.toml"))
-	if !strings.Contains(body, `auto_stop_machines = "stop"`) {
-		t.Fatal("auto_stop_machines must stay stop")
+	if !strings.Contains(body, `auto_stop_machines = "suspend"`) {
+		t.Fatal("auto_stop_machines must stay suspend")
 	}
-	if strings.Contains(body, `auto_stop_machines = "suspend"`) {
-		t.Fatal("auto_stop_machines switched to suspend")
+	if strings.Contains(body, `auto_stop_machines = "stop"`) {
+		t.Fatal("auto_stop_machines reverted to stop")
 	}
 	if !strings.Contains(body, "auto_start_machines = true") {
 		t.Fatal("auto_start_machines must stay on")

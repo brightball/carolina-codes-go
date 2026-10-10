@@ -45,3 +45,17 @@ Append-only ledger for this Go + standard-library `net/http` + pgx service. Go h
 - Choice: Keep the API on Go 1.25 (`go 1.25.0` in `go.mod`, mise pin `1.25.14`, image `golang:1.25`). Gates are `go test -race`, gosec, govulncheck, gitleaks, and golangci-lint, run through `make`, `mise`, and pre-commit.
 - Alternatives: Drop the race detector in CI, or bump the API module to a newer Go so govulncheck and golangci-lint build without `GOTOOLCHAIN=auto`.
 - Why: `-race` matches this single-process server. govulncheck v1.8.0 and golangci-lint v2.13.2 need a newer toolchain to compile. `GOTOOLCHAIN=auto` fetches that toolchain for the tool install only. The module and the release image stay on 1.25.
+
+## 2026-10-10 — Fly autostop suspend
+
+- Status: accepted
+- Choice: Stay scale-to-zero with `auto_stop_machines = "suspend"`, `auto_start_machines = true`, and `min_machines_running = 0`. Memory stays 256mb, with `GOMAXPROCS=1` and `GOMEMLIMIT=200MiB`.
+- Alternatives: Keep `auto_stop_machines = "stop"`.
+- Why: Suspend resumes an idle machine without a full cold boot and still scales to zero. Supersedes the autostop value in "2026-09-22 — IPv6 listen and Fly scale-to-zero".
+
+## 2026-10-10 — Go 1.26.9 and patched x/text
+
+- Status: accepted
+- Choice: Build and scan on Go 1.26.9 (`go 1.26.9` in `go.mod`, mise pin `1.26.9`, image `golang:1.26.9`). Require `golang.org/x/text` v0.41.0. Gitea jobs use `golang:1.26.9-bookworm`.
+- Alternatives: Stay on Go 1.25.14 and `golang.org/x/text` v0.39.0, or move to Go 1.27.3.
+- Why: govulncheck reports reachable standard-library vulnerabilities fixed in go1.26.9 and go1.27.3, and GO-2026-6629 fixed in `golang.org/x/text` v0.41.0. Go 1.25.14 has no fixed release. Supersedes the Go 1.25 pin in "2026-09-22 — Quality gates on Go 1.25" and the image pin in "2026-09-22 — Scratch image".
